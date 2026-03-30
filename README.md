@@ -218,22 +218,7 @@ Each agent has a focused task and a tight JSON schema. This produces more reliab
 **Why in-memory session storage?**  
 This is a demo. No database cold-start, no schema migrations, instant resets. The architecture document describes how this would migrate to Redis/PostgreSQL in production.
 
-**Why hardcoded fallback data?**  
-The app must never show a broken state to judges. If the Claude API is slow or unavailable, all three agents have hardcoded fallback responses that produce a complete, realistic dashboard.
 
----
-
-## Error Handling
-
-| Scenario | Behaviour |
-|----------|-----------|
-| Agent 1 fails (invalid JSON) | Return hardcoded Goal-Saver profile |
-| Agent 2 fails | Return 3 generic high-severity gaps |
-| Agent 3 fails | Return ET Prime + Tax Wizard + Term Insurance |
-| Session not found (chat) | Return friendly guidance message |
-| Network timeout (frontend) | Show fallback dashboard, log error silently |
-
----
 
 ## Business Impact
 
