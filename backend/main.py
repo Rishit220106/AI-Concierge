@@ -21,10 +21,12 @@ app.add_middleware(
 )
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-if ANTHROPIC_API_KEY and not ANTHROPIC_API_KEY.startswith("sk-ant-..."):
+if ANTHROPIC_API_KEY:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    print(f"Anthropic client initialized successfully")
 else:
     client = None
+    print("WARNING: No API key found - running in fallback mode")
 
 # Simple in-memory dict for session storage
 sessions = {}
@@ -100,16 +102,16 @@ FALLBACK_RECOMMENDATIONS = [
       "product_id": "et_tax_wizard",
       "product_name": "ET Tax Wizard",
       "priority": 2,
-      "reason": "Model old vs new regime and find ₹15,000–20,000 in annual tax savings.",
+      "reason": "Model old vs new regime and find Rs 15,000-20,000 in annual tax savings.",
       "match_tag": "TAX EFFICIENCY GAP DETECTED",
       "cta_text": "Try Tax Wizard",
       "is_top_pick": False
     },
     {
       "product_id": "et_term_insurance",
-      "product_name": "ET Partner · Term Insurance",
+      "product_name": "ET Partner - Term Insurance",
       "priority": 3,
-      "reason": "Get a ₹1 crore term cover quote before your home loan EMIs begin.",
+      "reason": "Get a Rs 1 crore term cover quote before your home loan EMIs begin.",
       "match_tag": "NO COVERAGE BEFORE EMI COMMITMENT",
       "cta_text": "Get Quote",
       "is_top_pick": False
@@ -117,15 +119,19 @@ FALLBACK_RECOMMENDATIONS = [
 ]
 
 # Agents
-def run_agent1(answers: UserAnswers) -> dict:
-    if not client: return FALLBACK_PROFILE
+async def run_agent1(answers: UserAnswers) -> dict:
+    print(f"Agent 1 running with answers: goal={answers.goal} investment_status={answers.investment_status} age_bracket={answers.age_bracket} insurance_status={answers.insurance_status} career_focus={answers.career_focus}")
+    if not client:
+        print("Agent 1: no client, returning fallback")
+        return FALLBACK_PROFILE
+    raw_text = None
     try:
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=600,
             system='''You are a financial profiling AI for Economic Times.
-Given a user's 4 answers, extract a structured profile.
-Respond ONLY with valid JSON. No markdown, no explanation.
+Given a user's answers, extract a structured profile.
+Respond ONLY with valid JSON. No markdown, no explanation, no code blocks.
 
 Output this exact JSON structure:
 {
@@ -137,13 +143,15 @@ Output this exact JSON structure:
   "risk_profile": "moderate",
   "life_stage": "goal_saver",
   "archetype_name": "Goal-saver",
-  "archetype_description": "Investing with a clear near-term target. Needs goal-aligned tools, tax efficiency, and milestone tracking."
+  "archetype_description": "Investing with a clear near-term target. Needs goal-aligned tools, tax efficiency, and milestone tracking.",
+  "career_focus": "financial",
+  "professional_vertical": "none"
 }
 
+goal options: "home_purchase" | "grow_investments" | "retirement" | "first_timer"
 life_stage options: "first_timer" | "goal_saver" | "wealth_builder" | "pre_retiree" | "corporate_professional" | "entrepreneur"
-income_signal: infer from age + investment status: "low" | "mid" | "high"
-risk_profile: infer from goal + age: "conservative" | "moderate" | "aggressive"
-If career_focus is 'Career growth', set professional_vertical based on any context clues. Default to 'none' if unclear.
+income_signal: "low" | "mid" | "high"
+risk_profile: "conservative" | "moderate" | "aggressive"
 career_focus: "financial" | "career" | "both"
 professional_vertical: "hr" | "tech" | "marketing" | "none"
 ''',
@@ -159,22 +167,38 @@ Career Focus: {answers.career_focus}
 Extract their financial profile as JSON."""
             }]
         )
-        return json.loads(response.content[0].text)
+        raw_text = response.content[0].text.strip()
+        print(f"Agent 1 raw response: {raw_text}")
+        # Strip markdown code blocks if present
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+        result = json.loads(raw_text)
+        return result
+    except json.JSONDecodeError as e:
+        print(f"Agent 1 JSON parse error: {e}")
+        print(f"Agent 1 raw text was: {raw_text}")
+        return FALLBACK_PROFILE
     except Exception as e:
-        print(f"Agent 1 error: {e}")
+        print(f"Agent 1 exception: {type(e).__name__}: {e}")
         return FALLBACK_PROFILE
 
-def run_agent2(profile: dict) -> list:
-    if not client: return FALLBACK_GAPS
+async def run_agent2(profile: dict) -> list:
+    print(f"Agent 2 running with profile life_stage={profile.get('life_stage')} goal={profile.get('goal')}")
+    if not client:
+        print("Agent 2: no client, returning fallback")
+        return FALLBACK_GAPS
+    raw_text = None
     try:
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=800,
             system='''You are a financial gap analysis AI for Economic Times.
 Given a user profile, identify their top financial gaps.
-Respond ONLY with valid JSON. No markdown, no explanation.
+Respond ONLY with valid JSON array. No markdown, no explanation, no code blocks.
 
-Output this exact structure — an array of gap objects:
+Output this exact structure:
 [
   {
     "gap_type": "no_term_insurance",
@@ -204,214 +228,115 @@ Return 3-5 gaps maximum, ordered by severity descending.
                 "content": f"User profile: {json.dumps(profile)}\n\nIdentify their financial gaps as JSON array."
             }]
         )
-        return json.loads(response.content[0].text)
+        raw_text = response.content[0].text.strip()
+        print(f"Agent 2 raw response: {raw_text}")
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+        return json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        print(f"Agent 2 JSON parse error: {e}, raw: {raw_text}")
+        return FALLBACK_GAPS
     except Exception as e:
-        print(f"Agent 2 error: {e}")
+        print(f"Agent 2 exception: {type(e).__name__}: {e}")
         return FALLBACK_GAPS
 
-def run_agent3(profile: dict, gaps: list) -> list:
-    if not client: return FALLBACK_RECOMMENDATIONS
+async def run_agent3(profile: dict, gaps: list) -> list:
+    print(f"Agent 3 running with {len(gaps)} gaps for life_stage={profile.get('life_stage')}")
+    if not client:
+        print("Agent 3: no client, returning fallback")
+        return FALLBACK_RECOMMENDATIONS
     ET_PRODUCT_CATALOGUE = """
-ET PRODUCT CATALOGUE — FULL ECOSYSTEM:
+ET PRODUCT CATALOGUE:
 
-1. ET Prime
-   id: et_prime
-   description: Premium research — Prime Shots (quick insights),
-   Prime Vantage (expert blogs), Prime Decoder (regulatory analysis),
-   Stock Reports Plus, Big Bull Portfolio tracker,
-   Stock Analyzer (30+ parameters), ET Wealth edition included.
-   best_for: goal_saver, wealth_builder, pre_retiree, 
-             home_purchase, any_goal
-   cta: "Explore ET Prime"
-
-2. ET Markets
-   id: et_markets
-   description: Live Sensex/Nifty, Screener Plus, Market Pulse,
-   Market Mood (fear/greed), 20+ technical indicators,
-   Free Live TV via ET NOW. SIP tracker, stock screener.
-   best_for: wealth_builder, has_sips, has_portfolio
-   cta: "Open ET Markets"
-
-3. ET Money Genius
-   id: et_money_genius
-   description: Commission-free SIP investing, Aadhaar OTP onboarding.
-   Genius tier: dynamic asset allocation across equity/gold/debt,
-   monthly auto-rebalancing, investor personality diagnostic.
-   Manages ₹28,000 crore in assets. Acquired by 360 ONE Wealth.
-   best_for: first_timer, goal_saver, has_sips, just_starting_out
-   cta: "Try ET Money"
-
-4. ET Wealth Tools
-   id: et_wealth_tools
-   description: Tax Saving Maximizer, SIP/FD/EPF calculators,
-   insurance guides, property & loan advice, 
-   FREE credit score check, retirement planning tools.
-   best_for: goal_saver, pre_retiree, home_purchase,
-             unused_80c gap, no_credit_score_awareness
-   cta: "Open ET Wealth"
-
-5. ET Wealth — Free Credit Score
-   id: et_credit_score
-   description: Free CIBIL credit score check via ET Wealth.
-   Critical before applying for a home loan. 60% of home loan
-   applications rejected due to poor CIBIL score.
-   best_for: home_purchase goal, no_home_loan_awareness gap
-   cta: "Check Free Credit Score"
-
-6. ET Partner — Term Insurance
-   id: et_term_insurance
-   description: ₹1 Cr term cover quotes, compare insurers,
-   instant eligibility. From ₹700/month for 25-35 age bracket.
-   Critical before EMI commitment.
-   best_for: no_term_insurance gap, home_purchase goal
-   cta: "Get Quote"
-
-7. ET Partner — Home Loan Comparison
-   id: et_home_loan
-   description: Compare home loan rates across 20+ banks,
-   eligibility check, EMI calculator.
-   best_for: home_purchase goal, no_home_loan_awareness gap
-   cta: "Check Eligibility"
-
-8. ET Money — NPS & FD
-   id: et_nps_fd
-   description: National Pension Scheme portal (world's
-   lowest-cost pension). High-interest FDs from Bajaj Finance,
-   Shriram Finance. DICGC insured up to ₹5 lakh.
-   best_for: pre_retiree, no_retirement_planning gap
-   cta: "Start NPS"
-
-9. ET Money Mentor
-   id: et_money_mentor
-   description: SIP recommendations for beginners, first
-   investment guide, explainer-first financial content.
-   best_for: first_timer, just_starting_out, under_25
-   cta: "Start Learning"
-
-10. ET Edge — Masterclasses & Summits
-    id: et_edge
-    description: Masterclasses by Dr. Ram Charan, Seth Godin
-    on negotiation, business storytelling, financial strategy.
-    Global Business Summit (2000+ leaders). GCC, SCM, ESG summits.
-    best_for: corporate_professional, entrepreneur, career_focus
-    cta: "Explore ET Edge"
-
-11. ETHRWorld
-    id: et_hrworld
-    description: HR community platform. CHRO Club (Infosys, Amazon,
-    Tata Motors). Future Forward Summits. Global Learning & Skilling
-    Report. For HR leaders and talent professionals.
-    best_for: professional_vertical=hr, career_focus
-    cta: "Join ETHRWorld"
-
-12. ETCIO
-    id: et_cio
-    description: Tech leadership platform. CIO Annual Conclave,
-    AI Playbook Index, CIO Satisfaction Survey, DeepTalks series.
-    For CIOs, CTOs, and enterprise tech leaders.
-    best_for: professional_vertical=tech, career_focus
-    cta: "Explore ETCIO"
-
-13. ETBrandEquity
-    id: et_brandequity
-    description: Marketing & media platform for 2M+ professionals.
-    Brand World Summit, The Shark Awards, Seth Godin masterclasses.
-    For CMOs, brand managers, marketing leaders.
-    best_for: professional_vertical=marketing, career_focus
-    cta: "Explore ETBrandEquity"
-
-14. ET Vernacular
-    id: et_vernacular
-    description: ET business news in 8 Indian languages:
-    Hindi, Gujarati, Marathi, Bengali, Tamil, Malayalam,
-    Telugu, Kannada. Same depth as English ET.
-    best_for: regional_investor, prefers_regional_language
-    cta: "Read in Your Language"
-
-15. ET Markets — Stock Screener Plus
-    id: et_screener_plus
-    description: Filter stocks on 30+ fundamental and technical
-    parameters. Market Mood indicator (fear/greed). 
-    For active equity investors.
-    best_for: wealth_builder, aggressive risk profile, has_portfolio
-    cta: "Open Screener Plus"
+1. ET Prime | id: et_prime | Deep research, home buying guides, stock analysis | best_for: any goal | cta: "Explore ET Prime"
+2. ET Markets | id: et_markets | Live stocks, SIP tracker, screener | best_for: has_sips, has_portfolio | cta: "Open ET Markets"
+3. ET Money Genius | id: et_money_genius | Commission-free SIP, auto-rebalancing, Rs28000Cr AUM | best_for: first_timer, goal_saver | cta: "Try ET Money"
+4. ET Wealth Tools | id: et_wealth_tools | Tax maximizer, calculators, credit score | best_for: goal_saver, pre_retiree | cta: "Open ET Wealth"
+5. ET Credit Score | id: et_credit_score | Free CIBIL check, critical before home loan | best_for: home_purchase | cta: "Check Free Credit Score"
+6. ET Term Insurance | id: et_term_insurance | Rs1Cr cover from Rs700/month | best_for: no_insurance gap | cta: "Get Quote"
+7. ET Home Loan | id: et_home_loan | Compare 20+ banks, EMI calculator | best_for: home_purchase | cta: "Check Eligibility"
+8. ET NPS & FD | id: et_nps_fd | Pension + high-interest FDs | best_for: pre_retiree | cta: "Start NPS"
+9. ET Money Mentor | id: et_money_mentor | Beginner SIP guide | best_for: first_timer | cta: "Start Learning"
+10. ET Edge | id: et_edge | Masterclasses, summits, Dr Ram Charan | best_for: career_focus | cta: "Explore ET Edge"
+11. ETHRWorld | id: et_hrworld | HR community, CHRO Club | best_for: professional_vertical=hr | cta: "Join ETHRWorld"
+12. ETCIO | id: et_cio | Tech leadership, CIO Conclave | best_for: professional_vertical=tech | cta: "Explore ETCIO"
+13. ETBrandEquity | id: et_brandequity | Marketing platform, Brand World Summit | best_for: professional_vertical=marketing | cta: "Explore ETBrandEquity"
+14. ET Vernacular | id: et_vernacular | News in 8 Indian languages | best_for: regional | cta: "Read in Your Language"
+15. ET Screener Plus | id: et_screener_plus | 30+ stock filters, Market Mood | best_for: wealth_builder | cta: "Open Screener Plus"
 """
+    raw_text = None
     try:
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=1000,
             system=f'''You are the ET product matching AI for Economic Times.
-Given a user profile and their financial gaps, select the most relevant ET products for them.
-Respond ONLY with valid JSON. No markdown, no explanation.
+Given a user profile and their financial gaps, select the most relevant ET products.
+Respond ONLY with valid JSON array. No markdown, no explanation, no code blocks.
 
 {ET_PRODUCT_CATALOGUE}
 
-Output this exact structure — array of 3-4 recommendations:
+Output this exact structure:
 [
   {{
     "product_id": "et_prime",
     "product_name": "ET Prime",
     "priority": 1,
-    "reason": "Access deep-dive home buying guides and property market analysis built for first-time buyers.",
-    "match_tag": "MATCHES YOUR HOME PURCHASE GOAL · 2-3 YR HORIZON",
+    "reason": "One or two sentences specific to this user's goal and gaps.",
+    "match_tag": "SHORT UPPERCASE REASON MAX 8 WORDS",
     "cta_text": "Explore ET Prime",
     "is_top_pick": true
   }}
 ]
 
-Rules:
-- is_top_pick: true for priority 1 only
-- match_tag: SHORT uppercase reason, max 8 words, explain WHY this matches THIS user specifically
-- reason: 1-2 sentences, mention the user's specific goal/gap
-- Return exactly 3-4 products, priority 1 being most important
-- Always address the highest severity gap first
-
-ROUTING RULES:
-- If career_focus = 'Career growth' AND professional_vertical = 'hr' → include ETHRWorld
-- If career_focus = 'Career growth' AND professional_vertical = 'tech' → include ETCIO  
-- If career_focus = 'Career growth' AND professional_vertical = 'marketing' → include ETBrandEquity
-- If career_focus = 'Career growth' (any) → include ET Edge
-- If goal = home_purchase → always include et_credit_score
-- If life_stage = first_timer → always include et_money_mentor
-- If life_stage = pre_retiree → always include et_nps_fd
-- If insurance_status = no_insurance → severity 5 gap, always include et_term_insurance as priority 1 or 2
-- Return 4-5 recommendations (not 3) when career_focus is also present alongside financial gaps
+ROUTING RULES — follow strictly:
+- career_focus=career AND professional_vertical=hr → include et_hrworld
+- career_focus=career AND professional_vertical=tech → include et_cio
+- career_focus=career AND professional_vertical=marketing → include et_brandequity
+- career_focus=career (any) → include et_edge
+- goal=home_purchase → include et_credit_score
+- life_stage=first_timer → include et_money_mentor
+- life_stage=pre_retiree → include et_nps_fd
+- insurance_status=no_insurance → include et_term_insurance as priority 1 or 2
+- Return 4-5 products when career_focus is present, 3-4 otherwise
+- is_top_pick: true for priority 1 ONLY
 ''',
             messages=[{
                 "role": "user",
-                "content": f"User profile: {json.dumps(profile)}\nUser gaps: {json.dumps(gaps)}\n\nReturn the 3-4 most relevant ET products for this user as JSON."
+                "content": f"User profile: {json.dumps(profile)}\nUser gaps: {json.dumps(gaps)}\n\nReturn the most relevant ET products for this user as JSON array."
             }]
         )
-        return json.loads(response.content[0].text)
+        raw_text = response.content[0].text.strip()
+        print(f"Agent 3 raw response: {raw_text}")
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+        return json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        print(f"Agent 3 JSON parse error: {e}, raw: {raw_text}")
+        return FALLBACK_RECOMMENDATIONS
     except Exception as e:
-        print(f"Agent 3 error: {e}")
+        print(f"Agent 3 exception: {type(e).__name__}: {e}")
         return FALLBACK_RECOMMENDATIONS
 
 def calculate_health_scores(profile: dict, gaps: list) -> dict:
-    scores = {"insurance": 4, "tax_efficiency": 4, "investments": 4, "savings_habit": 4}
-    
-    # Insurance
+    scores = {"insurance": 4, "tax_efficiency": 4, "investments": 3, "savings_habit": 4}
     if profile.get('insurance_status') == "no_insurance":
         scores['insurance'] = 2
-    
-    # Tax Efficiency
     has_80c_gap = any('80c' in gap.get('gap_type', '').lower() for gap in gaps)
     if has_80c_gap:
         scores['tax_efficiency'] = 2
-        
-    # Investments
     inv_status = profile.get('investment_status', '')
     if inv_status == 'has_sips':
         scores['investments'] = 3
-    elif inv_status == 'just_starting':
+    elif inv_status in ['just_starting', 'first_timer']:
         scores['investments'] = 2
-        
-    # Savings habit
     if inv_status in ['has_sips', 'has_portfolio']:
         scores['savings_habit'] = 4
-    elif inv_status == 'just_starting':
+    elif inv_status in ['just_starting', 'first_timer']:
         scores['savings_habit'] = 2
-        
     return scores
 
 # Endpoints
@@ -430,43 +355,33 @@ def create_session():
     return {"session_id": session_id}
 
 @app.post("/profile/build")
-def build_profile(req: ProfileBuildRequest):
-    if req.session_id not in sessions:
-        sessions[req.session_id] = {
-            "session_id": req.session_id,
-            "created_at": datetime.now().isoformat()
-        }
-    
-    start_time = time.time()
-    
-    profile = run_agent1(req.answers)
-    gaps = run_agent2(profile)
-    recommendations = run_agent3(profile, gaps)
-    
+async def profile_build(request: ProfileBuildRequest):
+    start = time.time()
+    print(f"\n--- Building profile for session {request.session_id} ---")
+
+    profile = await run_agent1(request.answers)
+    gaps = await run_agent2(profile)
+    recommendations = await run_agent3(profile, gaps)
     health_scores = calculate_health_scores(profile, gaps)
-    
-    archetype = {
-        "name": profile.get("archetype_name", "Goal-saver"),
-        "description": profile.get("archetype_description", ""),
-        "health_scores": health_scores
-    }
-    
-    sessions[req.session_id].update({
-        "answers": req.answers.dict(),
+
+    processing_time_ms = int((time.time() - start) * 1000)
+    print(f"--- Profile built in {processing_time_ms}ms ---\n")
+
+    result = {
+        "session_id": request.session_id,
         "profile": profile,
         "gaps": gaps,
         "recommendations": recommendations,
-        "archetype": archetype
-    })
-    
-    return {
-        "session_id": req.session_id,
-        "profile": profile,
-        "gaps": gaps,
-        "recommendations": recommendations,
-        "archetype": archetype,
-        "processing_time_ms": int((time.time() - start_time) * 1000)
+        "archetype": {
+            "name": profile.get("archetype_name", "Goal-saver"),
+            "description": profile.get("archetype_description", ""),
+            "health_scores": health_scores
+        },
+        "processing_time_ms": processing_time_ms
     }
+
+    sessions[request.session_id] = result
+    return result
 
 @app.get("/profile/{session_id}")
 def get_profile(session_id: str):
@@ -475,38 +390,30 @@ def get_profile(session_id: str):
     return sessions[session_id]
 
 @app.post("/chat/message")
-def chat_message(req: ChatRequest):
+async def chat_message(req: ChatRequest):
     if req.session_id not in sessions or not sessions[req.session_id].get("profile"):
         return {"response": "I don't have your profile yet. Please complete the onboarding first."}
-    
     profile = sessions[req.session_id]["profile"]
-    
     if not client:
-        return {"response": "I'm offline right now, but I'd recommend exploring ET Prime for deeper market insights."}
-        
+        return {"response": "Based on your profile, I'd recommend starting with your highest-priority gap first."}
     try:
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=400,
             system=f'''You are ET AI Concierge, a friendly financial guide for Economic Times users in India.
-You know this user's profile: {json.dumps(profile)}
-Answer their question in 2-3 sentences max.
-Be specific to their profile — mention their goal, gaps, or recommended ET products where relevant.
+You know this user profile: {json.dumps(profile)}
+Answer in 2-3 sentences max. Be specific to their profile.
 Use simple language. No jargon. Be warm and direct.
-Always end with one actionable next step from ET's ecosystem.''',
-            messages=[{
-                "role": "user",
-                "content": req.message
-            }]
+Always end with one actionable next step from ET ecosystem.''',
+            messages=[{"role": "user", "content": req.message}]
         )
         return {"response": response.content[0].text}
     except Exception as e:
         print(f"Chat error: {e}")
-        return {"response": "I'm having trouble connecting right now, but you should definitely start by checking out your top recommendation! Take a look at ET Money Genius or ET Edge alongside your dashboard tailored hits."}
+        return {"response": "Based on your profile, I'd recommend starting with your highest-priority gap first. Would you like me to guide you?"}
 
 @app.post("/crosssell/trigger")
 def crosssell_trigger(req: CrossSellRequest):
-    # Rule-based, NO Claude call needed
     event = req.behaviour_event.lower()
     if "real_estate" in event:
         return {"nudge": {"product": "ET Home Loan", "message": "Planning a purchase? Calculate your EMI and check eligibility instantly.", "cta": "Check Eligibility"}}
@@ -516,13 +423,8 @@ def crosssell_trigger(req: CrossSellRequest):
         return {"nudge": {"product": "ET Markets", "message": "Track these stocks directly in ET Markets SIP tracker.", "cta": "Open ET Markets"}}
     elif "insurance" in event:
         return {"nudge": {"product": "ET Term Insurance", "message": "Protect your family's future before making big financial commitments.", "cta": "Get Quote"}}
-    
-    return {"nudge": {"product": "ET Prime", "message": "Get deeper insights into these topics with ET Prime.", "cta": "Explore ET Prime"}}
+    return {"nudge": {"product": "ET Prime", "message": "Get deeper insights with ET Prime.", "cta": "Explore ET Prime"}}
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    return {"status": "ok", "timestamp": datetime.now().isoformat(), "client_ready": client is not None}
